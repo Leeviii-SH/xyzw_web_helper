@@ -138,7 +138,7 @@ export default defineConfig(async () => {
       open: true,
       host: true,
       proxy: {
-        // 手机号验证码接口直连 ucenter-app-server（不要再手写 Host，否则会被网关按默认 Host 拒绝）
+        // 手机号验证码接口直连 ucenter-app-server（不要再手写 Host，否则会被网关按默认Host拒绝）
         "/api/hortor-ucenter": {
           target: "https://ucenter-app-server.hortorgames.com",
           changeOrigin: true,

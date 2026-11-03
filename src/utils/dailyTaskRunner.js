@@ -547,7 +547,8 @@ export class DailyTaskRunner {
             "开始竞技场",
           );
 
-          const arenaAttempts = Math.min(3, this.getTaskState(13).remaining);
+          // 前 3 次免费，日常任务只要 1 次，补满以免浪费，场间节奏由 commandDelay 控制
+          const arenaAttempts = Math.max(3, this.getTaskState(13).remaining);
           for (let i = 1; i <= arenaAttempts; i++) {
             this.log(`竞技场战斗 ${i}/${arenaAttempts}`);
             const targets = await this.executeGameCommand(
@@ -573,7 +574,6 @@ export class DailyTaskRunner {
               );
               return false;
             }
-            await this.sleep(1000);
           }
         },
       });

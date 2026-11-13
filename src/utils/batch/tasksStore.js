@@ -68,6 +68,10 @@ export function createTasksStore(deps) {
 
     const currentPurchaseConfig = await readBlackMarketPurchaseConfig(tokenId);
 
+    const configuredPurchaseCnt = Number(batchSettings.blackMarketPurchaseCnt);
+    const hasConfiguredCnt =
+      Number.isFinite(configuredPurchaseCnt) && configuredPurchaseCnt > 0;
+
     addLog({
       time: new Date().toLocaleTimeString(),
       message: `${tokenName} 当前黑市清单: ${currentPurchaseConfig.purchaseItemList.length} 项，共 ${currentPurchaseConfig.purchaseCnt} 次`,
@@ -78,7 +82,8 @@ export function createTasksStore(deps) {
       compareBlackMarketPurchaseLists(
         currentPurchaseConfig.purchaseItemList,
         configuredPurchaseList,
-      )
+      ) &&
+      (!hasConfiguredCnt || currentPurchaseConfig.purchaseCnt === Math.trunc(configuredPurchaseCnt))
     ) {
       addLog({
         time: new Date().toLocaleTimeString(),
@@ -89,12 +94,15 @@ export function createTasksStore(deps) {
       return;
     }
 
-    const purchaseCnt = Math.max(1, currentPurchaseConfig.purchaseCnt || 1);
+    // 购买轮次：配置了就用配置值（webhelper 缺这个设置，原来只能沿用服务器现值）
+    const purchaseCnt = hasConfiguredCnt
+      ? Math.trunc(configuredPurchaseCnt)
+      : Math.max(1, currentPurchaseConfig.purchaseCnt || 1);
     const purchaseItemList = toStorePurchaseItemList(configuredPurchaseList);
 
     addLog({
       time: new Date().toLocaleTimeString(),
-      message: `${tokenName} 正在下发黑市采购清单...`,
+      message: `${tokenName} 正在下发黑市采购清单（${purchaseItemList.length} 项，购买轮次 ${purchaseCnt}）...`,
       type: "info",
     });
 
@@ -121,9 +129,20 @@ export function createTasksStore(deps) {
       throw new Error("黑市采购清单写回后校验失败");
     }
 
+    if (
+      hasConfiguredCnt &&
+      Number(verifiedPurchaseConfig.purchaseCnt) !== purchaseCnt
+    ) {
+      addLog({
+        time: new Date().toLocaleTimeString(),
+        message: `${tokenName} 购买轮次未按配置生效：目标 ${purchaseCnt}，服务器返回 ${verifiedPurchaseConfig.purchaseCnt}`,
+        type: "warning",
+      });
+    }
+
     addLog({
       time: new Date().toLocaleTimeString(),
-      message: `${tokenName} 黑市采购清单已更新 ${purchaseItemList.length} 项`,
+      message: `${tokenName} 黑市采购清单已更新 ${purchaseItemList.length} 项，购买轮次 ${verifiedPurchaseConfig.purchaseCnt || purchaseCnt}`,
       type: "success",
     });
   };

@@ -181,6 +181,7 @@ export function createTasksTower(deps) {
         let count = 0;
         const MAX_CLIMB = 100;
         let consecutiveFailures = 0;
+        let rewardRetries = 0; // 1500040（上座塔奖励未领取）重试上限，防止无限循环
 
         while (energy > 0 && count < MAX_CLIMB && !shouldStop.value) {
           try {
@@ -235,6 +236,15 @@ export function createTasksTower(deps) {
 
             // 处理"上座塔奖励未领取"错误 (1500040)
             if (err.message && err.message.includes("1500040")) {
+              rewardRetries = (rewardRetries || 0) + 1;
+              if (rewardRetries > 5) {
+                addLog({
+                  time: new Date().toLocaleTimeString(),
+                  message: `${token.name} 上座塔奖励连续 ${rewardRetries - 1} 次领取无效，放弃该角色（避免死循环）`,
+                  type: "error",
+                });
+                break;
+              }
               addLog({
                 time: new Date().toLocaleTimeString(),
                 message: `${token.name} 上座塔奖励未领取，尝试自动领取并等待...`,
@@ -350,6 +360,43 @@ export function createTasksTower(deps) {
   /**
    * 爬怪异塔
    */
+  /** 领取怪异塔「俱乐部目标」（taskId 4/5 为参与人数与通关层数，6~9 为后续档位）
+   *  12200050=已领取，12200040=条件未达成，都属于正常状态，不记失败。 */
+  const claimLegionGoals = async (tokenId, evoTower, tokenName) => {
+    let claimed = 0;
+    for (const taskId of [4, 5, 6, 7, 8, 9]) {
+      try {
+        const res = await tokenStore.sendMessageWithPromise(
+          tokenId,
+          "evotower_claimlegiontask",
+          { taskId },
+          5000,
+        );
+        if (res?.reward?.length) {
+          claimed++;
+        }
+      } catch (error) {
+        const msg = String(error?.message || error);
+        if (!/12200040|12200050/.test(msg)) {
+          addLog({
+            time: new Date().toLocaleTimeString(),
+            message: `${tokenName} 俱乐部目标${taskId}领取失败: ${msg.slice(0, 60)}`,
+            type: "warning",
+          });
+        }
+      }
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    if (claimed > 0) {
+      addLog({
+        time: new Date().toLocaleTimeString(),
+        message: `${tokenName} 俱乐部目标领取 ${claimed} 项`,
+        type: "success",
+      });
+    }
+    return claimed;
+  };
+
   const climbWeirdTower = async () => {
     if (selectedTokens.value.length === 0) return;
 
@@ -426,6 +473,9 @@ export function createTasksTower(deps) {
         );
 
         let currentEnergy = evotowerinfo1?.evoTower?.energy;
+
+        // 先领俱乐部目标：解锁攻击/血量加成与自动战斗，爬塔胜率更高
+        await claimLegionGoals(tokenId, evotowerinfo1?.evoTower, token.name);
 
         addLog({
           time: new Date().toLocaleTimeString(),

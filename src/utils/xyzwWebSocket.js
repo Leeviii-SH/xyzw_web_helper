@@ -275,6 +275,8 @@ export function registerDefaultCommands(reg) {
     .register("mergebox_claimmergeprogress", { actType: 1 })
     .register("evotower_claimtask", { taskId: 1 })
     .register("evotower_buyenergy", { energy: 1 })
+    // 怪异塔「俱乐部目标」领取（上游未实现）：taskId 4/5 是参与人数与通关层数两档
+    .register("evotower_claimlegiontask", { taskId: 4 })
     .register("tower_buyenergy", { buyNum: 1 })
 
     // 瓶子机器人

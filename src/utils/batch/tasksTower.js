@@ -361,7 +361,15 @@ export function createTasksTower(deps) {
   /**
    * 爬怪异塔
    */
-  /** 领取怪异塔「俱乐部目标」（taskId 4/5 为参与人数与通关层数，6~9 为后续档位）
+  // 怪异塔 IP 级限流（400340）：同进程内所有号共享一次 5 分钟冷却，最多触发 2 次
+const evoRatePause = { until: 0, count: 0 };
+const evoSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function waitEvoRatePause() {
+  const wait = evoRatePause.until - Date.now();
+  if (wait > 0) await evoSleep(wait);
+}
+
+/** 领取怪异塔「俱乐部目标」（taskId 4/5 为参与人数与通关层数，6~9 为后续档位）
    *  12200050=已领取，12200040=条件未达成，都属于正常状态，不记失败。 */
   const claimLegionGoals = async (tokenId, evoTower, tokenName) => {
     let claimed = 0;
@@ -498,17 +506,23 @@ export function createTasksTower(deps) {
         );
 
         let count = 0;
-        // 爬塔间隔：优先用单独的「爬塔间隔」，没配就沿用通用「战斗延迟」
-        const CLIMB_DELAY = Math.max(
-          200,
-          Number(batchSettings?.weirdTowerDelay) ||
-            Number(batchSettings?.battleDelay) ||
-            delayConfig?.battle ||
-            500,
-        );
+        // 爬塔间隔：Node 端已用「全局请求闸门」统一节流（batchSettings.globalGate），
+        // 这时不再各号各睡（否则等于间隔翻倍）；浏览器端没有闸门，仍按每号间隔睡。
+        const GATE_MS = Number(batchSettings?.globalGate) || 0;
+        const CLIMB_DELAY = GATE_MS > 0
+          ? 0
+          : Math.max(
+              200,
+              Number(batchSettings?.weirdTowerDelay) ||
+                Number(batchSettings?.battleDelay) ||
+                delayConfig?.battle ||
+                500,
+            );
         addLog({
           time: new Date().toLocaleTimeString(),
-          message: `${token.name} 爬塔间隔 ${CLIMB_DELAY}ms${Number(batchSettings?.weirdTowerDelay) ? "（单独配置）" : "（沿用战斗延迟）"}`,
+          message: GATE_MS > 0
+            ? `${token.name} 使用全局请求闸门 ${GATE_MS}ms（所有号共享）`
+            : `${token.name} 爬塔间隔 ${CLIMB_DELAY}ms${Number(batchSettings?.weirdTowerDelay) ? "（单独配置）" : "（沿用战斗延迟）"}`,
           type: "info",
         });
         const MAX_CLIMB = normalizeWeirdTowerMaxClimb(
@@ -522,9 +536,11 @@ export function createTasksTower(deps) {
           type: "info",
         });
 
+        let reconnectAttempts = 0;
         while (currentEnergy > 0 && count < MAX_CLIMB && !shouldStop.value) {
           try {
-            // 每次开战前也按间隔等一等：连续请求太快会触发 IP 级限流（400340）
+            // 全局冷却中（别的号撞了 400340）就先等；再按间隔放行本次请求
+            await waitEvoRatePause();
             await new Promise((r) => setTimeout(r, CLIMB_DELAY));
             await tokenStore.sendMessageWithPromise(
               tokenId,
@@ -627,10 +643,80 @@ export function createTasksTower(deps) {
               // 忽略刷新失败
             }
           } catch (err) {
+            const msg = String(err?.message || err);
+
+            // 1) IP 级限流：全局停 5 分钟再继续，不算失败
+            if (msg.includes("400340")) {
+              if (evoRatePause.count >= 2) {
+                addLog({
+                  time: new Date().toLocaleTimeString(),
+                  message: `${token.name} 本轮已触发 ${evoRatePause.count} 次限流冷却，停止爬塔（等小鱼干恢复后再跑）`,
+                  type: "error",
+                });
+                break;
+              }
+              evoRatePause.count++;
+              evoRatePause.until = Date.now() + 5 * 60 * 1000;
+              addLog({
+                time: new Date().toLocaleTimeString(),
+                message: `${token.name} 触发 IP 限流 (400340)，全局暂停 5 分钟（第 ${evoRatePause.count}/2 次）`,
+                type: "warning",
+              });
+              await waitEvoRatePause();
+              continue;
+            }
+
+            // 2) 章节奖励没领到：先补领再接着打（400340 打断了领奖时会出现）
+            if (msg.includes("12200020")) {
+              addLog({
+                time: new Date().toLocaleTimeString(),
+                message: `${token.name} 上座塔奖励未领取，补领后重试`,
+                type: "warning",
+              });
+              try {
+                const nowInfo = await tokenStore.sendMessageWithPromise(
+                  tokenId,
+                  "evotower_getinfo",
+                  {},
+                  5000,
+                );
+                await claimPendingEvoTowerRewards(
+                  tokenStore,
+                  tokenId,
+                  nowInfo?.evoTower,
+                  (message, type) =>
+                    addLog({
+                      time: new Date().toLocaleTimeString(),
+                      message: `${token.name} ${message}`,
+                      type,
+                    }),
+                );
+              } catch {}
+              consecutiveFailures = 0;
+              await new Promise((r) => setTimeout(r, 1000));
+              continue;
+            }
+
+            // 3) 连接被服务端断开：重连后继续（一轮最多 2 次）
+            if (/WebSocket|连接已关闭|ECONN|socket|network/i.test(msg) && reconnectAttempts < 2) {
+              reconnectAttempts++;
+              addLog({
+                time: new Date().toLocaleTimeString(),
+                message: `${token.name} 连接断开，第 ${reconnectAttempts} 次重连`,
+                type: "warning",
+              });
+              try {
+                await ensureConnection(tokenId);
+              } catch {}
+              consecutiveFailures = 0;
+              await new Promise((r) => setTimeout(r, 2000));
+              continue;
+            }
+
             consecutiveFailures++;
             addLog({
               time: new Date().toLocaleTimeString(),
-              message: `战斗出错: ${err.message} (重试 ${consecutiveFailures}/3)`,
+              message: `战斗出错: ${msg} (重试 ${consecutiveFailures}/3)`,
               type: "warning",
             });
 

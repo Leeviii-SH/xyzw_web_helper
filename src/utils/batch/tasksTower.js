@@ -94,6 +94,7 @@ export function createTasksTower(deps) {
     currentSettings,
     loadSettings,
     weirdTowerMaxClimb,
+    delayConfig,
   } = deps;
 
   /**
@@ -497,6 +498,19 @@ export function createTasksTower(deps) {
         );
 
         let count = 0;
+        // 爬塔间隔：优先用单独的「爬塔间隔」，没配就沿用通用「战斗延迟」
+        const CLIMB_DELAY = Math.max(
+          200,
+          Number(batchSettings?.weirdTowerDelay) ||
+            Number(batchSettings?.battleDelay) ||
+            delayConfig?.battle ||
+            500,
+        );
+        addLog({
+          time: new Date().toLocaleTimeString(),
+          message: `${token.name} 爬塔间隔 ${CLIMB_DELAY}ms${Number(batchSettings?.weirdTowerDelay) ? "（单独配置）" : "（沿用战斗延迟）"}`,
+          type: "info",
+        });
         const MAX_CLIMB = normalizeWeirdTowerMaxClimb(
           weirdTowerMaxClimb?.value ?? weirdTowerMaxClimb,
         );
@@ -510,6 +524,8 @@ export function createTasksTower(deps) {
 
         while (currentEnergy > 0 && count < MAX_CLIMB && !shouldStop.value) {
           try {
+            // 每次开战前也按间隔等一等：连续请求太快会触发 IP 级限流（400340）
+            await new Promise((r) => setTimeout(r, CLIMB_DELAY));
             await tokenStore.sendMessageWithPromise(
               tokenId,
               "evotower_readyfight",
@@ -535,7 +551,7 @@ export function createTasksTower(deps) {
               type: "info",
             });
 
-            await new Promise((r) => setTimeout(r, 500));
+            await new Promise((r) => setTimeout(r, CLIMB_DELAY));
 
             const evotowerinfo2 = await tokenStore.sendMessageWithPromise(
               tokenId,

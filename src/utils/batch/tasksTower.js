@@ -629,18 +629,23 @@ async function waitEvoRatePause() {
                 }),
             );
 
-            // 刷新能量
-            try {
-              const evotowerinfoRefresh1 =
-                await tokenStore.sendMessageWithPromise(
-                  tokenId,
-                  "evotower_getinfo",
-                  {},
-                  5000,
-                );
-              currentEnergy = evotowerinfoRefresh1?.evoTower?.energy || 0;
-            } catch (e) {
-              // 忽略刷新失败
+            // 能量：直接复用战斗后那次 getinfo（evotowerinfo2），每 5 次再强制刷新一次。
+            // 原来每次爬完都额外发一次 getinfo，等于每次爬塔 4 个请求，白白多占 25% 限流额度。
+            const energyFromFight = Number(evotowerinfo2?.evoTower?.energy);
+            if (Number.isFinite(energyFromFight)) currentEnergy = energyFromFight;
+            if (count % 5 === 0) {
+              try {
+                const evotowerinfoRefresh1 =
+                  await tokenStore.sendMessageWithPromise(
+                    tokenId,
+                    "evotower_getinfo",
+                    {},
+                    5000,
+                  );
+                currentEnergy = evotowerinfoRefresh1?.evoTower?.energy || 0;
+              } catch (e) {
+                // 忽略刷新失败
+              }
             }
           } catch (err) {
             const msg = String(err?.message || err);

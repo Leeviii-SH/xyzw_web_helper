@@ -13,7 +13,7 @@ const GOODS_SUFFIX = "41";
 
 // 每日任务要求：抽奖 10 次 + 竞技场战斗 1 次（2026-11 游戏改版）
 // 任务进度在 warOrderActivityInfo.complete 里，id 规则 = actId + "01"(抽奖) / "02"(竞技场)
-const DRAW_MISSION_SUFFIX = "01";
+const DRAW_MISSION_SUFFIX = "03"; // 每日任务「抽奖」档：03/04/05 都是今天抽了几次，每天重置
 const ARENA_MISSION_SUFFIX = "02";
 const DEFAULT_DRAW_TIMES = 10;
 const DEFAULT_ARENA_TIMES = 1;
@@ -383,22 +383,29 @@ export function createTasksXuanwuBlessing(deps) {
           Number(batchSettings?.xuanwuArenaBattles) || DEFAULT_ARENA_TIMES;
         const beforeComplete = (await fetchWarOrder(tokenId, actId))?.complete || info?.complete || {};
         const arenaId = `${actId}${ARENA_MISSION_SUFFIX}`;
-        // 抽奖次数只能看 lotteryInfo.lotteryNum：complete 里 01 号任务是别的计数（实测抽奖不涨）
-        let drawDone = 0;
-        try {
-          const lotteryInfo = await tokenStore.sendMessageWithPromise(
-            tokenId,
-            "activity_getlotteryinfo",
-            {},
-            8000,
-          );
-          drawDone = Number(lotteryInfo?.lotteryInfo?.lotteryNum) || 0;
-        } catch {}
+        // 「今日抽奖次数」看每日任务 03（抽奖1次那档的进度，会每天重置）；
+        // lotteryInfo.lotteryNum 是整期累计（到 10 就不动了），拿它判断会导致第二天起一次都不抽。
+        const drawId = `${actId}${DRAW_MISSION_SUFFIX}`;
+        // 注意：0 是合法值（今天还没抽），只有 key 完全缺失才退回整期累计
+        let drawDone = Number(beforeComplete[drawId] ?? NaN);
+        if (!Number.isFinite(drawDone)) {
+          // 兜底：万一 03 缺失（活动刚切换），退回整期累计，至少别重复抽爆
+          try {
+            const lotteryInfo = await tokenStore.sendMessageWithPromise(
+              tokenId,
+              "activity_getlotteryinfo",
+              {},
+              8000,
+            );
+            const lifetime = Number(lotteryInfo?.lotteryInfo?.lotteryNum) || 0;
+            drawDone = Number.isFinite(lifetime) ? lifetime : 0;
+          } catch {}
+        }
         const arenaDone = Number(beforeComplete[arenaId] || 0);
         const drawNeed = Math.max(0, drawTarget - drawDone);
         const arenaNeed = Math.max(0, arenaTarget - arenaDone);
         if (drawNeed > 0) {
-          log(`${token.name} 抽奖进度 ${drawDone}/${drawTarget}（lotteryNum），补 ${drawNeed} 次`);
+          log(`${token.name} 今日抽奖 ${drawDone}/${drawTarget}，补 ${drawNeed} 次`);
         }
         if (arenaNeed > 0) {
           log(`${token.name} 竞技场进度 ${arenaDone}/${arenaTarget}，补 ${arenaNeed} 次`);

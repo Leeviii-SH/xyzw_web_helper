@@ -723,6 +723,9 @@ export function createTasksTower(deps) {
         });
       } finally {
         tokenStore.closeWebSocketConnection(tokenId);
+        // 必须还连接槽位：ensureConnection 会 waitForConnectionSlot()，不还的话
+        // 并发 2 个号之后就永远等在那里（表现为任务卡死）
+        if (typeof releaseConnectionSlot === "function") releaseConnectionSlot();
       }
     });
 

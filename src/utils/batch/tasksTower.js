@@ -636,6 +636,100 @@ export function createTasksTower(deps) {
   /**
    * 领取怪异塔免费道具
    */
+  /** 批量领取怪异塔「俱乐部目标」：参与人数/通关层数两档（含攻击/血量加成与进度奖励） */
+  const batchClaimLegionGoals = async () => {
+    if (selectedTokens.value.length === 0) return;
+    isRunning.value = true;
+    shouldStop.value = false;
+    selectedTokens.value.forEach((id) => {
+      tokenStatus.value[id] = "waiting";
+    });
+
+    const taskPromises = selectedTokens.value.map(async (tokenId) => {
+      if (shouldStop.value) return;
+      tokenStatus.value[tokenId] = "running";
+      const token = tokens.value.find((t) => t.id === tokenId);
+      let claimed = 0;
+      try {
+        addLog({
+          time: new Date().toLocaleTimeString(),
+          message: `=== 开始领取怪异塔俱乐部目标: ${token.name} ===`,
+          type: "info",
+        });
+        await ensureConnection(tokenId);
+
+        const info = await tokenStore.sendMessageWithPromise(
+          tokenId,
+          "evotower_getinfo",
+          {},
+          5000,
+        );
+        const evoTower = info?.evoTower || {};
+        if (!evoTower.bindLegionId) {
+          addLog({
+            time: new Date().toLocaleTimeString(),
+            message: `${token.name} 未加入俱乐部，跳过`,
+            type: "info",
+          });
+          tokenStatus.value[tokenId] = "completed";
+          return;
+        }
+
+        // taskId 4/5 = 参与人数 / 通关层数两档，6~9 是后续档位；12200050=已领，12200040=条件未达成
+        for (const taskId of [4, 5, 6, 7, 8, 9]) {
+          try {
+            const res = await tokenStore.sendMessageWithPromise(
+              tokenId,
+              "evotower_claimlegiontask",
+              { taskId },
+              5000,
+            );
+            if (res?.reward?.length) {
+              claimed++;
+              const text = res.reward
+                .map((r) => `道具${r.itemId}x${r.value}`)
+                .join(", ");
+              addLog({
+                time: new Date().toLocaleTimeString(),
+                message: `${token.name} 俱乐部目标${taskId} 领取: ${text}`,
+                type: "success",
+              });
+            }
+          } catch (error) {
+            const msg = String(error?.message || error);
+            if (!/12200040|12200050/.test(msg)) {
+              addLog({
+                time: new Date().toLocaleTimeString(),
+                message: `${token.name} 俱乐部目标${taskId} 领取失败: ${msg.slice(0, 60)}`,
+                type: "warning",
+              });
+            }
+          }
+          await new Promise((r) => setTimeout(r, 300));
+        }
+
+        addLog({
+          time: new Date().toLocaleTimeString(),
+          message: `=== ${token.name} 俱乐部目标领取 ${claimed} 项 ===`,
+          type: claimed > 0 ? "success" : "info",
+        });
+        tokenStatus.value[tokenId] = "completed";
+      } catch (error) {
+        tokenStatus.value[tokenId] = "failed";
+        addLog({
+          time: new Date().toLocaleTimeString(),
+          message: `${token.name} 领取俱乐部目标失败: ${error?.message || error}`,
+          type: "error",
+        });
+      } finally {
+        tokenStore.closeWebSocketConnection(tokenId);
+      }
+    });
+
+    await Promise.allSettled(taskPromises);
+    isRunning.value = false;
+  };
+
   const batchClaimFreeEnergy = async () => {
     if (selectedTokens.value.length === 0) return;
     isRunning.value = true;
@@ -1394,6 +1488,7 @@ export function createTasksTower(deps) {
     climbTower,
     climbWeirdTower,
     batchClaimFreeEnergy,
+    batchClaimLegionGoals,
     skinChallenge,
     batchUseItems,
     batchMergeItems,

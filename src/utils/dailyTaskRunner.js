@@ -6,6 +6,15 @@ import {
   runWithDailyTaskLock,
 } from "@/utils/dailyTaskState";
 
+// 400340 是 IP 级限流：一个号撞到，所有号都会被拒。这里做进程内全局暂停，
+// 避免“每个号各自撞一次、各自等 60 秒”，28 个号批量跑时能省掉大量无用请求。
+let dailyRatePauseUntil = 0;
+
+async function waitDailyRatePause(sleeper) {
+  const left = dailyRatePauseUntil - Date.now();
+  if (left > 0 && typeof sleeper === "function") await sleeper(left);
+}
+
 const taskLabels = {
   1: "登录游戏",
   2: "分享游戏",
@@ -95,6 +104,7 @@ export class DailyTaskRunner {
     attempt = 0,
   ) {
     try {
+      await waitDailyRatePause((ms) => this.sleep(ms));
       if (description) this.log(`执行: ${description}`);
       this.roleStateDirty = true;
       const result = await this.sendRequest(tokenId, () =>
@@ -111,8 +121,10 @@ export class DailyTaskRunner {
       // 撞 IP 限流（400340）时等 60 秒重试一次：批量跑几十个号时，最后几个号的领奖
       // 经常正好落在限流窗口里，不重试就会被漏掉（H19/H20 那次就是这样）
       if (attempt < 1 && String(error?.message || "").includes("400340")) {
-        if (description) this.log(`${description} 撞限流，等待 60 秒后重试一次`, "warning");
-        await this.sleep(60000);
+        const now = Date.now();
+        if (dailyRatePauseUntil < now) dailyRatePauseUntil = now + 60000;
+        if (description) this.log(`${description} 撞限流，全局暂停到 ${new Date(dailyRatePauseUntil).toLocaleTimeString()} 后重试`, "warning");
+        await waitDailyRatePause((ms) => this.sleep(ms));
         return this.executeGameCommand(tokenId, cmd, params, description, timeout, attempt + 1);
       }
       if (description) {
@@ -883,6 +895,7 @@ export class DailyTaskRunner {
         name: "兜底补领任务积分与活跃奖励",
         execute: async () => {
           const sweep = async (cmd, params, label) => {
+            await waitDailyRatePause((ms) => this.sleep(ms));
             try {
               const res = await this.tokenStore.sendMessageWithPromise(
                 tokenId,
@@ -902,9 +915,18 @@ export class DailyTaskRunner {
           for (let taskId = 1; taskId <= 12; taskId++) {
             claimed += await sweep("task_claimdailypoint", { taskId }, `任务积分${taskId}`);
           }
-          for (let rewardId = 1; rewardId <= 3; rewardId++) {
-            claimed += await sweep("task_claimdailyreward", { rewardId }, `日常活跃${rewardId}`);
-            claimed += await sweep("task_claimweekreward", { rewardId }, `周常活跃${rewardId}`);
+          // 服务器会返回已领档位（dailyReward/weekReward: {1:true,...}），只补未领的，
+          // 正常情况下每个号只有 1~2 个请求，28 个号批量跑不会额外压满限流窗口。
+          const dt = this.roleData?.dailyTask || {};
+          const claimedDaily = dt.dailyReward || {};
+          const claimedWeek = dt.weekReward || {};
+          for (let rewardId = 1; rewardId <= 8; rewardId++) {
+            if (!claimedDaily[rewardId]) {
+              claimed += await sweep("task_claimdailyreward", { rewardId }, `日常活跃${rewardId}`);
+            }
+            if (!claimedWeek[rewardId]) {
+              claimed += await sweep("task_claimweekreward", { rewardId }, `周常活跃${rewardId}`);
+            }
           }
           this.log(`兜底补领完成：共领到 ${claimed} 项`);
         },

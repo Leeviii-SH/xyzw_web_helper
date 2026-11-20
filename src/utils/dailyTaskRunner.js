@@ -868,6 +868,41 @@ export class DailyTaskRunner {
         },
       });
     }
+    // 兜底模式（官方配置拿不到）：不知道奖励 id 和档位阈值，就穷举补领一次。
+    // 服务器对无效/未达标的 id 会直接拒绝，代价只是几十个请求；成功才记日志。
+    if (this.taskConfig.fallback) {
+      taskList.push({
+        name: "兜底补领任务积分与活跃奖励",
+        execute: async () => {
+          const sweep = async (cmd, params, label) => {
+            try {
+              const res = await this.tokenStore.sendMessageWithPromise(
+                tokenId,
+                cmd,
+                params,
+                5000,
+              );
+              if (res?.reward?.length) {
+                this.log(`${label} 补领成功`, "success");
+                return 1;
+              }
+            } catch {}
+            await this.sleep(200);
+            return 0;
+          };
+          let claimed = 0;
+          for (let taskId = 1; taskId <= 20; taskId++) {
+            claimed += await sweep("task_claimdailypoint", { taskId }, `任务积分${taskId}`);
+          }
+          for (let rewardId = 1; rewardId <= 10; rewardId++) {
+            claimed += await sweep("task_claimdailyreward", { rewardId }, `日常活跃${rewardId}`);
+            claimed += await sweep("task_claimweekreward", { rewardId }, `周常活跃${rewardId}`);
+          }
+          this.log(`兜底补领完成：共领到 ${claimed} 项`);
+        },
+      });
+    }
+
     taskList.push({
       name: "领取通行证奖励",
       execute: () =>

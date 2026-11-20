@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import path from "node:path";
+
 const configsByVersion = new Map();
 const activeTokenRuns = new Set();
 
@@ -185,6 +188,33 @@ function buildFallbackConfig() {
 // 官方配置的真实获取路径（2026-11 更新后 /data/<ver>/config.json 已下线）：
 // 客户端用的是 Cocos 资源包 —— /remote/config/config.<ver>.json 是包清单，
 // 其中 name="config" 的 cc.JsonAsset 才是整份配置 JSON（约 11MB，外面套一层序列化数组）。
+// 这份配置只有游戏更新（dataBundleVer 变化）才会变，而且整包 11MB、本机下载要 60s+。
+// 只把用得到的 4 张表（约 22KB）按版本号落盘，下次同版本进程直接读，省掉整包下载。
+const CACHE_DIR = process.env.XYZW_DAILY_CONFIG_CACHE || path.join(process.cwd(), "data", "state");
+const CACHE_KEYS = ["DailyTaskConf", "DayLimitConf", "WeekLimitConf", "ConstantConf"];
+
+function cacheFile(version) {
+  return path.join(CACHE_DIR, `xyzw-daily-config-${version}.json`);
+}
+
+function readCachedConfig(version) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(cacheFile(version), "utf8"));
+    return parsed?.DailyTaskConf ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedConfig(version, config) {
+  try {
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
+    const slim = {};
+    for (const key of CACHE_KEYS) if (config[key]) slim[key] = config[key];
+    fs.writeFileSync(cacheFile(version), JSON.stringify(slim));
+  } catch {}
+}
+
 const RES_CDN = "https://xxz-xyzw-res.hortorgames.com";
 const B64_KEYS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 const HEX_CHARS = "0123456789abcdef";
@@ -218,7 +248,9 @@ function jsonFromBundlePayload(raw) {
 }
 
 async function fetchOfficialConfig(version, fetchConfig) {
-  const timeout = { signal: AbortSignal.timeout(45000) };
+  const cached = readCachedConfig(version);
+  if (cached) return cached;
+  const timeout = { signal: AbortSignal.timeout(120000) };
   const manifestRes = await fetchConfig(`${RES_CDN}/remote/config/config.${version}.json`, timeout);
   if (!manifestRes.ok) throw new Error(`配置包清单 HTTP ${manifestRes.status}`);
   const manifest = await manifestRes.json();
@@ -246,6 +278,7 @@ async function fetchOfficialConfig(version, fetchConfig) {
   const raw = await assetRes.json();
   const config = jsonFromBundlePayload(raw);
   if (!config) throw new Error("配置资源里没有 DailyTaskConf");
+  writeCachedConfig(version, config);
   return config;
 }
 

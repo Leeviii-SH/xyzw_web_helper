@@ -1,6 +1,3 @@
-import fs from "node:fs";
-import path from "node:path";
-
 const configsByVersion = new Map();
 const activeTokenRuns = new Set();
 
@@ -189,29 +186,51 @@ function buildFallbackConfig() {
 // 客户端用的是 Cocos 资源包 —— /remote/config/config.<ver>.json 是包清单，
 // 其中 name="config" 的 cc.JsonAsset 才是整份配置 JSON（约 11MB，外面套一层序列化数组）。
 // 这份配置只有游戏更新（dataBundleVer 变化）才会变，而且整包 11MB、本机下载要 60s+。
-// 只把用得到的 4 张表（约 22KB）按版本号落盘，下次同版本进程直接读，省掉整包下载。
-const CACHE_DIR = process.env.XYZW_DAILY_CONFIG_CACHE || path.join(process.cwd(), "data", "state");
+// 只把用得到的 4 张表（约 22KB）按版本号落盘，下次同版本进程直接读。
+// 注意：这段只在 Node 侧生效（服务端任务），浏览器构建里没有 fs，自动跳过、退回内存缓存。
 const CACHE_KEYS = ["DailyTaskConf", "DayLimitConf", "WeekLimitConf", "ConstantConf"];
+let diskModules;
 
-function cacheFile(version) {
-  return path.join(CACHE_DIR, `xyzw-daily-config-${version}.json`);
+async function loadDiskModules() {
+  if (diskModules !== undefined) return diskModules;
+  try {
+    if (typeof window !== "undefined" || !globalThis.process?.versions?.node) {
+      diskModules = null;
+    } else {
+      const [fsMod, pathMod] = await Promise.all([import("node:fs"), import("node:path")]);
+      diskModules = { fs: fsMod.default ?? fsMod, path: pathMod.default ?? pathMod };
+    }
+  } catch {
+    diskModules = null;
+  }
+  return diskModules;
 }
 
-function readCachedConfig(version) {
+function cacheFile(mods, version) {
+  const dir = globalThis.process?.env?.XYZW_DAILY_CONFIG_CACHE || mods.path.join(globalThis.process.cwd(), "data", "state");
+  return mods.path.join(dir, `xyzw-daily-config-${version}.json`);
+}
+
+async function readCachedConfig(version) {
+  const mods = await loadDiskModules();
+  if (!mods) return null;
   try {
-    const parsed = JSON.parse(fs.readFileSync(cacheFile(version), "utf8"));
+    const parsed = JSON.parse(mods.fs.readFileSync(cacheFile(mods, version), "utf8"));
     return parsed?.DailyTaskConf ? parsed : null;
   } catch {
     return null;
   }
 }
 
-function writeCachedConfig(version, config) {
+async function writeCachedConfig(version, config) {
+  const mods = await loadDiskModules();
+  if (!mods) return;
   try {
-    fs.mkdirSync(CACHE_DIR, { recursive: true });
+    const file = cacheFile(mods, version);
+    mods.fs.mkdirSync(mods.path.dirname(file), { recursive: true });
     const slim = {};
     for (const key of CACHE_KEYS) if (config[key]) slim[key] = config[key];
-    fs.writeFileSync(cacheFile(version), JSON.stringify(slim));
+    mods.fs.writeFileSync(file, JSON.stringify(slim));
   } catch {}
 }
 
@@ -248,7 +267,7 @@ function jsonFromBundlePayload(raw) {
 }
 
 async function fetchOfficialConfig(version, fetchConfig) {
-  const cached = readCachedConfig(version);
+  const cached = await readCachedConfig(version);
   if (cached) return cached;
   const timeout = { signal: AbortSignal.timeout(120000) };
   const manifestRes = await fetchConfig(`${RES_CDN}/remote/config/config.${version}.json`, timeout);
@@ -278,7 +297,7 @@ async function fetchOfficialConfig(version, fetchConfig) {
   const raw = await assetRes.json();
   const config = jsonFromBundlePayload(raw);
   if (!config) throw new Error("配置资源里没有 DailyTaskConf");
-  writeCachedConfig(version, config);
+  await writeCachedConfig(version, config);
   return config;
 }
 

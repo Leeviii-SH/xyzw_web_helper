@@ -92,6 +92,7 @@ export class DailyTaskRunner {
     params = {},
     description = "",
     timeout = 8000,
+    attempt = 0,
   ) {
     try {
       if (description) this.log(`执行: ${description}`);
@@ -107,6 +108,13 @@ export class DailyTaskRunner {
         );
       return result;
     } catch (error) {
+      // 撞 IP 限流（400340）时等 60 秒重试一次：批量跑几十个号时，最后几个号的领奖
+      // 经常正好落在限流窗口里，不重试就会被漏掉（H19/H20 那次就是这样）
+      if (attempt < 1 && String(error?.message || "").includes("400340")) {
+        if (description) this.log(`${description} 撞限流，等待 60 秒后重试一次`, "warning");
+        await this.sleep(60000);
+        return this.executeGameCommand(tokenId, cmd, params, description, timeout, attempt + 1);
+      }
       if (description) {
         const token = this.tokenStore.gameTokens.find((t) => t.id === tokenId);
         const tokenName = token?.name || tokenId;
@@ -891,10 +899,10 @@ export class DailyTaskRunner {
             return 0;
           };
           let claimed = 0;
-          for (let taskId = 1; taskId <= 20; taskId++) {
+          for (let taskId = 1; taskId <= 12; taskId++) {
             claimed += await sweep("task_claimdailypoint", { taskId }, `任务积分${taskId}`);
           }
-          for (let rewardId = 1; rewardId <= 10; rewardId++) {
+          for (let rewardId = 1; rewardId <= 3; rewardId++) {
             claimed += await sweep("task_claimdailyreward", { rewardId }, `日常活跃${rewardId}`);
             claimed += await sweep("task_claimweekreward", { rewardId }, `周常活跃${rewardId}`);
           }

@@ -372,6 +372,8 @@ export function registerDefaultCommands(reg) {
     // 功法
     .register("legacy_getinfo")
     .register("legacy_claimhangup")
+    // 每赛季首次：点一下「开始采集」后功法才产出（否则 legacy_claimhangup 报 12400160）
+    .register("legacy_beginhangup")
     // 功法残卷赠送
     .register("legacy_gift_getlist")
     .register("legacy_gift_send", { recipientId: 0, itemId: 0, quantity: 0 })

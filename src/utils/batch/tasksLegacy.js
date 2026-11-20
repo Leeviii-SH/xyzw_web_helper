@@ -55,12 +55,31 @@ export function createTasksLegacy(deps) {
         });
         await ensureConnection(tokenId);
 
-        const LegacyClaimHangUpResp = await tokenStore.sendMessageWithPromise(
-          tokenId,
-          "legacy_claimhangup",
-          {},
-          5000,
-        );
+        let LegacyClaimHangUpResp;
+        try {
+          LegacyClaimHangUpResp = await tokenStore.sendMessageWithPromise(
+            tokenId,
+            "legacy_claimhangup",
+            {},
+            5000,
+          );
+        } catch (error) {
+          // 12400160：本赛季还没点「开始采集」，功法不产出 → 自动开始一次再重试。
+          // 一个赛季只需一次；之后正常领取不会再走这条分支。
+          if (!String(error?.message || "").includes("12400160")) throw error;
+          addLog({
+            time: new Date().toLocaleTimeString(),
+            message: `${token.name} 本季未开始采集功法，自动开始采集`,
+            type: "warning",
+          });
+          await tokenStore.sendMessageWithPromise(tokenId, "legacy_beginhangup", {}, 5000);
+          LegacyClaimHangUpResp = await tokenStore.sendMessageWithPromise(
+            tokenId,
+            "legacy_claimhangup",
+            {},
+            5000,
+          );
+        }
         addLog({
           time: new Date().toLocaleTimeString(),
           message: `=== ${token.name} 成功领取功法残卷${LegacyClaimHangUpResp.reward[0].value}，共有${LegacyClaimHangUpResp.role.items[37007].quantity}个`,

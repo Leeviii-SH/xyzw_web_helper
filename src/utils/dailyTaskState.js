@@ -157,6 +157,31 @@ export async function fillHangUpTime({
  * @param {Function} [fetchConfig] Fetch implementation for the official CDN.
  * @returns {Promise<object>} Validated task definitions and point-reward thresholds.
  */
+// 官方配置拿不到时的本地兜底（2026-11 更新后 config.json 404）。
+// 目标次数来自历史成功日志与代码：登录1/分享1/赠币3/招募2/挂机5/点金3/宝箱3/黑市1/竞技场1/盐罐1。
+// 奖励表留空：点奖励暂时不领（服务器会拒绝也不影响任务本身），等官方配置恢复后自动走官方数据。
+const FALLBACK_DAILY_TASKS = [
+  { id: 1, completeCondition: 1, completeValue: 1 },
+  { id: 2, completeCondition: 2, completeValue: 1 },
+  { id: 3, completeCondition: 3, completeValue: 3 },
+  { id: 4, completeCondition: 4, completeValue: 2 },
+  { id: 5, completeCondition: 5, completeValue: 5 },
+  { id: 6, completeCondition: 6, completeValue: 3 },
+  { id: 7, completeCondition: 7, completeValue: 3 },
+  { id: 8, completeCondition: 12, completeValue: 1 },
+  { id: 9, completeCondition: 13, completeValue: 1 },
+  { id: 10, completeCondition: 14, completeValue: 1 },
+];
+
+function buildFallbackConfig() {
+  return {
+    tasks: FALLBACK_DAILY_TASKS.map((t) => ({ ...t })),
+    dailyRewards: [],
+    weeklyRewards: [],
+    fallback: true,
+  };
+}
+
 export async function loadDailyTaskConfig(
   tokenStore,
   tokenId,
@@ -173,13 +198,21 @@ export async function loadDailyTaskConfig(
     throw new Error("服务器未提供有效的任务配置版本");
   if (!configsByVersion.has(version)) {
     const loading = (async () => {
-      const response = await fetchConfig(
-        `https://xxz-xyzw-res.hortorgames.com/data/${version}/config.json`,
-        { signal: AbortSignal.timeout(30000) },
-      );
-      if (!response.ok) throw new Error("官方任务配置读取失败");
-      const config = await response.json();
-      return validateDailyTaskConfig(config);
+      try {
+        const response = await fetchConfig(
+          `https://xxz-xyzw-res.hortorgames.com/data/${version}/config.json`,
+          { signal: AbortSignal.timeout(30000) },
+        );
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const config = await response.json();
+        return validateDailyTaskConfig(config);
+      } catch (error) {
+        // 官方配置不可用 → 用本地兜底，任务照常跑（目标次数写死，奖励表留空）
+        console.warn(
+          `[dailyTask] 官方任务配置读取失败（${String(error?.message || error)}），改用本地兜底配置`,
+        );
+        return buildFallbackConfig();
+      }
     })();
     configsByVersion.set(version, loading);
     loading.catch(() => {

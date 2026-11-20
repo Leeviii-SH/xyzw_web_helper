@@ -182,6 +182,73 @@ function buildFallbackConfig() {
   };
 }
 
+// 官方配置的真实获取路径（2026-11 更新后 /data/<ver>/config.json 已下线）：
+// 客户端用的是 Cocos 资源包 —— /remote/config/config.<ver>.json 是包清单，
+// 其中 name="config" 的 cc.JsonAsset 才是整份配置 JSON（约 11MB，外面套一层序列化数组）。
+const RES_CDN = "https://xxz-xyzw-res.hortorgames.com";
+const B64_KEYS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const HEX_CHARS = "0123456789abcdef";
+
+/** Cocos 压缩 uuid(22 位) → 标准 uuid */
+function decompressUuid(uuid) {
+  if (!uuid || uuid.length !== 22) return uuid;
+  const out = [uuid[0], uuid[1]];
+  for (let i = 2, j = 2; i < 22; i += 2) {
+    const lhs = B64_KEYS.indexOf(uuid[i]);
+    const rhs = B64_KEYS.indexOf(uuid[i + 1]);
+    out[j++] = HEX_CHARS[lhs >> 2];
+    out[j++] = HEX_CHARS[((lhs & 3) << 2) | (rhs >> 4)];
+    out[j++] = HEX_CHARS[rhs & 15];
+  }
+  const hex = out.join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function jsonFromBundlePayload(raw) {
+  if (!Array.isArray(raw)) return raw;
+  for (const entry of raw) {
+    if (!Array.isArray(entry)) continue;
+    for (const item of entry) {
+      if (Array.isArray(item) && typeof item[2] === "object" && item[2] !== null) {
+        if (item[2].DailyTaskConf) return item[2];
+      }
+    }
+  }
+  return null;
+}
+
+async function fetchOfficialConfig(version, fetchConfig) {
+  const timeout = { signal: AbortSignal.timeout(45000) };
+  const manifestRes = await fetchConfig(`${RES_CDN}/remote/config/config.${version}.json`, timeout);
+  if (!manifestRes.ok) throw new Error(`配置包清单 HTTP ${manifestRes.status}`);
+  const manifest = await manifestRes.json();
+  const paths = manifest?.paths || {};
+  const types = manifest?.types || [];
+  let assetIndex = null;
+  for (const [idx, info] of Object.entries(paths)) {
+    if (info?.[0] === "config" && types[info?.[1]] === "cc.JsonAsset") {
+      assetIndex = Number(idx);
+      break;
+    }
+  }
+  if (assetIndex === null) throw new Error("配置包里找不到 config JSON 资源");
+  const importVers = manifest?.versions?.import || [];
+  let hash = null;
+  for (let i = 0; i + 1 < importVers.length; i += 2) {
+    if (Number(importVers[i]) === assetIndex) hash = importVers[i + 1];
+  }
+  if (!hash) throw new Error("配置包缺少资源版本号");
+  const uuid = decompressUuid(manifest?.uuids?.[assetIndex]);
+  if (!uuid) throw new Error("配置包缺少资源 uuid");
+  const assetUrl = `${RES_CDN}/remote/config/import/${uuid.slice(0, 2)}/${uuid}.${hash}.json`;
+  const assetRes = await fetchConfig(assetUrl, timeout);
+  if (!assetRes.ok) throw new Error(`配置资源 HTTP ${assetRes.status}`);
+  const raw = await assetRes.json();
+  const config = jsonFromBundlePayload(raw);
+  if (!config) throw new Error("配置资源里没有 DailyTaskConf");
+  return config;
+}
+
 export async function loadDailyTaskConfig(
   tokenStore,
   tokenId,
@@ -199,12 +266,7 @@ export async function loadDailyTaskConfig(
   if (!configsByVersion.has(version)) {
     const loading = (async () => {
       try {
-        const response = await fetchConfig(
-          `https://xxz-xyzw-res.hortorgames.com/data/${version}/config.json`,
-          { signal: AbortSignal.timeout(30000) },
-        );
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const config = await response.json();
+        const config = await fetchOfficialConfig(version, fetchConfig);
         return validateDailyTaskConfig(config);
       } catch (error) {
         // 官方配置不可用 → 用本地兜底，任务照常跑（目标次数写死，奖励表留空）

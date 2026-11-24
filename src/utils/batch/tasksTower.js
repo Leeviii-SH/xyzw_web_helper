@@ -1487,6 +1487,388 @@ export function createTasksTower(deps) {
     message.success("批量一键合成结束");
   };
 
+
+  /** 合成一轮：领等级奖励 + 合成腾出格子（参考上游 PR #433 的实现） */
+  const mergeRoundOnce = async (tokenId, token) => {
+    const infoRes = await tokenStore.sendMessageWithPromise(
+      tokenId,
+      "mergebox_getinfo",
+      { actType: 1 },
+      5000,
+    );
+    const box = infoRes?.mergeBox;
+    if (!box) return { ok: false, merged: false };
+
+    const taskMap = box.taskMap || {};
+    const claimed = box.taskClaimMap || {};
+    for (const taskId in taskMap) {
+      if (shouldStop.value) break;
+      if (taskMap[taskId] !== 0 && !claimed[taskId]) {
+        await tokenStore
+          .sendMessageWithPromise(
+            tokenId,
+            "mergebox_claimmergeprogress",
+            { actType: 1, taskId: Number.parseInt(taskId) },
+            2000,
+          )
+          .catch(() => {});
+        addLog({
+          time: new Date().toLocaleTimeString(),
+          message: `${token.name} 领取合成奖励: 任务${taskId}`,
+          type: "success",
+        });
+        await new Promise((r) => setTimeout(r, 300));
+      }
+    }
+
+    const gridMap = box.gridMap || {};
+    const groups = {};
+    for (const xStr in gridMap) {
+      for (const yStr in gridMap[xStr]) {
+        const item = gridMap[xStr][yStr];
+        if (!item) continue;
+        if (!isSameGameValue(item.gridConfId, 0)) continue;
+        if (!(item.gridItemId > 0) || item.isLock) continue;
+        (groups[item.gridItemId] ||= []).push({
+          x: Number.parseInt(xStr),
+          y: Number.parseInt(yStr),
+        });
+      }
+    }
+    const hasPair = Object.values(groups).some((g) => g.length >= 2);
+    if (!hasPair) return { ok: true, merged: false };
+
+    const isLevel8OrAbove =
+      box.taskMap && box.taskMap["251212208"] && box.taskMap["251212208"] !== 0;
+    let merged = false;
+    if (isLevel8OrAbove) {
+      const autoRes = await tokenStore
+        .sendMessageWithPromise(tokenId, "mergebox_automergeitem", { actType: 1 }, 10000)
+        .catch(() => null);
+      merged = autoRes !== null;
+      await new Promise((r) => setTimeout(r, 1200));
+    } else {
+      for (const id in groups) {
+        const group = groups[id];
+        while (group.length >= 2 && !shouldStop.value) {
+          const source = group.shift();
+          const target = group.shift();
+          const mergeRes = await tokenStore
+            .sendMessageWithPromise(
+              tokenId,
+              "mergebox_mergeitem",
+              {
+                actType: 1,
+                sourcePos: { gridX: source.x, gridY: source.y },
+                targetPos: { gridX: target.x, gridY: target.y },
+              },
+              3000,
+            )
+            .catch(() => null);
+          if (mergeRes !== null) merged = true;
+          await new Promise((r) => setTimeout(r, 250));
+        }
+      }
+    }
+    return { ok: true, merged };
+  };
+
+  /**
+   * 一键怪异塔「领取 + 使用 + 合成」：
+   * 领免费道具 → 用钥匙开箱（棋盘满 12300040 就合成腾位）→ 领累计消耗/合成等级奖励 → 循环到钥匙用完。
+   */
+  const batchUseAndMergeItems = async () => {
+    if (selectedTokens.value.length === 0) return;
+    isRunning.value = true;
+    shouldStop.value = false;
+    selectedTokens.value.forEach((id) => {
+      tokenStatus.value[id] = "waiting";
+    });
+
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    const taskPromises = selectedTokens.value.map(async (tokenId) => {
+      if (shouldStop.value) return;
+      tokenStatus.value[tokenId] = "running";
+      const token = tokens.value.find((t) => t.id === tokenId);
+      try {
+        addLog({
+          time: new Date().toLocaleTimeString(),
+          message: `=== 开始怪异塔领取+使用+合成: ${token.name} ===`,
+          type: "info",
+        });
+        await ensureConnection(tokenId);
+
+        // 1) 领免费道具（失败不阻塞主流程）
+        try {
+          const info = await tokenStore.sendMessageWithPromise(
+            tokenId,
+            "mergebox_getinfo",
+            { actType: 1 },
+            5000,
+          );
+          const free = Number(info?.mergeBox?.freeEnergy) || 0;
+          if (free > 0) {
+            await tokenStore.sendMessageWithPromise(
+              tokenId,
+              "mergebox_claimfreeenergy",
+              { actType: 1 },
+              5000,
+            );
+            addLog({
+              time: new Date().toLocaleTimeString(),
+              message: `${token.name} 领取免费道具 ${free} 个`,
+              type: "success",
+            });
+          }
+        } catch {}
+
+        // 怪异塔活动按周期开放（约每 3 周 7 天）：关闭时只做合成，不反复重试
+        let towerOpen = true;
+        try {
+          await tokenStore.sendMessageWithPromise(tokenId, "evotower_getinfo", {}, 5000);
+        } catch (e) {
+          if (String(e?.message || e).includes("2100010")) towerOpen = false;
+        }
+        if (!towerOpen) {
+          addLog({
+            time: new Date().toLocaleTimeString(),
+            message: `${token.name} 怪异塔活动未开放，跳过开箱，只做合成`,
+            type: "info",
+          });
+          const round = await mergeRoundOnce(tokenId, token).catch(() => ({ ok: false, merged: false }));
+          addLog({
+            time: new Date().toLocaleTimeString(),
+            message: `${token.name} 完成：怪异塔未开放${round.merged ? "，已合成一轮" : "，无可合成物品"}`,
+            type: "success",
+          });
+          tokenStatus.value[tokenId] = "completed";
+          return;
+        }
+
+        // 2) 开箱 + 合成主循环
+        let totalUsed = 0;
+        let rounds = 0;
+        let errs = 0;
+        let stalls = 0;
+        let costClaimed = false;
+        let aborted = false;
+        const MAX_ROUNDS = 50;
+        const MAX_ERR = 3;
+
+        while (!shouldStop.value && !aborted) {
+          let left = 0;
+          try {
+            const ti = await tokenStore.sendMessageWithPromise(
+              tokenId,
+              "evotower_getinfo",
+              {},
+              5000,
+            );
+            left = Number(ti?.evoTower?.lotteryLeftCnt) || 0;
+            errs = 0;
+          } catch (err) {
+            errs++;
+            addLog({
+              time: new Date().toLocaleTimeString(),
+              message: `${token.name} 获取怪异塔信息失败(${errs}/${MAX_ERR}): ${err?.message || err}`,
+              type: "error",
+            });
+            if (errs >= MAX_ERR) {
+              aborted = true;
+              break;
+            }
+            await sleep(500);
+            continue;
+          }
+          if (!left) {
+            addLog({
+              time: new Date().toLocaleTimeString(),
+              message: `${token.name} 钥匙已用完`,
+              type: "info",
+            });
+            break;
+          }
+
+          rounds++;
+          let cost = null;
+          let usedThisRound = 0;
+          let gridFull = false;
+          let openFailed = false;
+
+          while (left > 0 && !shouldStop.value) {
+            if (cost === null) {
+              try {
+                const mi = await tokenStore.sendMessageWithPromise(
+                  tokenId,
+                  "mergebox_getinfo",
+                  { actType: 1 },
+                  5000,
+                );
+                cost = Number(mi?.mergeBox?.costTotalCnt) || 0;
+              } catch (err) {
+                errs++;
+                if (errs >= MAX_ERR) {
+                  aborted = true;
+                  break;
+                }
+                await sleep(500);
+                continue;
+              }
+            }
+            const pos =
+              cost < 2
+                ? { gridX: 4, gridY: 5 }
+                : cost < 102
+                  ? { gridX: 7, gridY: 3 }
+                  : { gridX: 6, gridY: 3 };
+            try {
+              await tokenStore.sendMessageWithPromise(
+                tokenId,
+                "mergebox_openbox",
+                { actType: 1, pos },
+                5000,
+              );
+              cost++;
+              left--;
+              totalUsed++;
+              usedThisRound++;
+              errs = 0;
+              openFailed = false;
+              await sleep(400);
+            } catch (err) {
+              const msg = String(err?.message || err);
+              openFailed = true;
+              if (msg.includes("12300040")) {
+                gridFull = true;
+                addLog({
+                  time: new Date().toLocaleTimeString(),
+                  message: `${token.name} 棋盘已满，执行合成腾位`,
+                  type: "warning",
+                });
+                break;
+              }
+              addLog({
+                time: new Date().toLocaleTimeString(),
+                message: `${token.name} 使用道具失败，合成后重试: ${msg}`,
+                type: "error",
+              });
+              break;
+            }
+          }
+          if (aborted) break;
+
+          const round = await mergeRoundOnce(tokenId, token).catch(() => ({
+            ok: false,
+            merged: false,
+          }));
+          if (usedThisRound > 0) stalls = 0;
+          else stalls++;
+
+          if (usedThisRound === 0 && !round.merged) {
+            if (!openFailed) {
+              addLog({
+                time: new Date().toLocaleTimeString(),
+                message: gridFull
+                  ? `${token.name} 棋盘已满且无可合成物品，停止任务`
+                  : `${token.name} 无钥匙可用且无可合成物品，停止任务`,
+                type: "warning",
+              });
+              break;
+            }
+            if (stalls >= MAX_ERR) {
+              addLog({
+                time: new Date().toLocaleTimeString(),
+                message: `${token.name} 连续 ${stalls} 轮无法使用道具且合成无进展，停止任务`,
+                type: "error",
+              });
+              aborted = true;
+              break;
+            }
+          }
+
+          if (round.ok) {
+            const costRes = await tokenStore
+              .sendMessageWithPromise(
+                tokenId,
+                "mergebox_claimcostprogress",
+                { actType: 1 },
+                5000,
+              )
+              .catch(() => null);
+            if (costRes !== null && !costClaimed) {
+              costClaimed = true;
+              addLog({
+                time: new Date().toLocaleTimeString(),
+                message: `${token.name} 已领取累计消耗奖励`,
+                type: "success",
+              });
+            }
+            try {
+              const fi = await tokenStore.sendMessageWithPromise(
+                tokenId,
+                "mergebox_getinfo",
+                { actType: 1 },
+                5000,
+              );
+              const free = Number(fi?.mergeBox?.freeEnergy) || 0;
+              if (free > 0) {
+                await tokenStore.sendMessageWithPromise(
+                  tokenId,
+                  "mergebox_claimfreeenergy",
+                  { actType: 1 },
+                  5000,
+                );
+                addLog({
+                  time: new Date().toLocaleTimeString(),
+                  message: `${token.name} 补领免费道具 ${free} 个`,
+                  type: "success",
+                });
+              }
+            } catch {}
+          }
+
+          if (rounds >= MAX_ROUNDS) {
+            addLog({
+              time: new Date().toLocaleTimeString(),
+              message: `${token.name} 已达最大轮次 ${MAX_ROUNDS}，停止任务`,
+              type: "warning",
+            });
+            break;
+          }
+          await sleep(400);
+        }
+
+        addLog({
+          time: new Date().toLocaleTimeString(),
+          message: `${token.name} 完成：使用道具 ${totalUsed} 个，合成轮次 ${rounds}`,
+          type: "success",
+        });
+        tokenStatus.value[tokenId] = "completed";
+      } catch (error) {
+        tokenStatus.value[tokenId] = "failed";
+        addLog({
+          time: new Date().toLocaleTimeString(),
+          message: `=== ${token.name} 领取+使用+合成失败: ${error?.message || "未知错误"}`,
+          type: "error",
+        });
+      } finally {
+        tokenStore.closeWebSocketConnection(tokenId);
+        releaseConnectionSlot();
+        addLog({
+          time: new Date().toLocaleTimeString(),
+          message: `${token.name} 连接已关闭  (队列: ${connectionQueue.active}/${batchSettings.maxActive})`,
+          type: "info",
+        });
+      }
+    });
+
+    await Promise.all(taskPromises);
+    isRunning.value = false;
+    currentRunningTokenId.value = null;
+    message.success("怪异塔领取+使用+合成结束");
+  };
+
   return {
     climbTower,
     climbWeirdTower,
@@ -1495,6 +1877,7 @@ export function createTasksTower(deps) {
     skinChallenge,
     batchUseItems,
     batchMergeItems,
+    batchUseAndMergeItems,
   };
 }
 

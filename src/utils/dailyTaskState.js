@@ -306,38 +306,88 @@ export async function loadDailyTaskConfig(
   tokenId,
   fetchConfig = globalThis.fetch,
 ) {
-  const response = await tokenStore.sendMessageWithPromise(
-    tokenId,
-    "system_getdatabundlever",
-    {},
-    15000,
-  );
-  const version = response?.dataBundleVer;
-  if (typeof version !== "string" || !/^[\w-]+$/.test(version))
-    throw new Error("服务器未提供有效的任务配置版本");
-  if (!configsByVersion.has(version)) {
-    const loading = (async () => {
-      try {
+  // 首选：CDN 的数据版本（data/version.json，24 字节）→ /data/<ver>/config.json（约 15MB 明文 JSON）。
+  // 注意 dataBundleVer 是 Cocos 资源包 hash，不是数据版本，用它拼 /data/ 路径必然 404。
+  let dataVersion = null;
+  try {
+    const verRes = await fetchConfig(`${RES_CDN}/data/version.json`, {
+      signal: AbortSignal.timeout(15000),
+    });
+    if (verRes.ok) {
+      const v = (await verRes.json())?.version;
+      if (typeof v === "string" && /^[\w-]+$/.test(v)) dataVersion = v;
+    }
+  } catch {}
+
+  const loadByDataVersion = async (version) => {
+    const cachedConfig = await readCachedConfig(version);
+    if (cachedConfig) return validateDailyTaskConfig(cachedConfig);
+    const res = await fetchConfig(`${RES_CDN}/data/${version}/config.json`, {
+      signal: AbortSignal.timeout(120000),
+    });
+    if (!res.ok) throw new Error(`数据配置 HTTP ${res.status}`);
+    const config = await res.json();
+    await writeCachedConfig(version, config);
+    return validateDailyTaskConfig(config);
+  };
+
+  if (dataVersion) {
+    const key = `data:${dataVersion}`;
+    if (!configsByVersion.has(key)) {
+      const loading = (async () => {
+        try {
+          return await loadByDataVersion(dataVersion);
+        } catch (error) {
+          const fallback = await loadViaBundle(tokenStore, tokenId, fetchConfig, error);
+          return fallback;
+        }
+      })();
+      configsByVersion.set(key, loading);
+      loading.catch(() => {
+        if (configsByVersion.get(key) === loading) configsByVersion.delete(key);
+      });
+      for (const k of configsByVersion.keys()) if (k !== key) configsByVersion.delete(k);
+    }
+    return configsByVersion.get(key);
+  }
+
+  // CDN 版本读不到 → 用服务器给的 dataBundleVer 走 Cocos 配置包（旧路径）
+  return loadViaBundle(tokenStore, tokenId, fetchConfig, new Error("CDN 版本读取失败"));
+}
+
+/** 兜底 1：服务器 dataBundleVer + Cocos 配置包；兜底 2：本地写死任务表 */
+async function loadViaBundle(tokenStore, tokenId, fetchConfig, firstError) {
+  let version = null;
+  try {
+    const response = await tokenStore.sendMessageWithPromise(
+      tokenId,
+      "system_getdatabundlever",
+      {},
+      15000,
+    );
+    version = response?.dataBundleVer;
+  } catch {}
+  const key = `bundle:${version || "unknown"}`;
+  if (configsByVersion.has(key)) return configsByVersion.get(key);
+  const loading = (async () => {
+    try {
+      if (typeof version === "string" && /^[\w-]+$/.test(version)) {
         const config = await fetchOfficialConfig(version, fetchConfig);
         return validateDailyTaskConfig(config);
-      } catch (error) {
-        // 官方配置不可用 → 用本地兜底，任务照常跑（目标次数写死，奖励表留空）
-        console.warn(
-          `[dailyTask] 官方任务配置读取失败（${String(error?.message || error)}），改用本地兜底配置`,
-        );
-        return buildFallbackConfig();
       }
-    })();
-    configsByVersion.set(version, loading);
-    loading.catch(() => {
-      if (configsByVersion.get(version) === loading)
-        configsByVersion.delete(version);
-    });
-    for (const key of configsByVersion.keys()) {
-      if (key !== version) configsByVersion.delete(key);
+      throw firstError;
+    } catch (error) {
+      console.warn(
+        `[dailyTask] 官方任务配置读取失败（${String(error?.message || error)}），改用本地兜底配置`,
+      );
+      return buildFallbackConfig();
     }
-  }
-  return configsByVersion.get(version);
+  })();
+  configsByVersion.set(key, loading);
+  loading.catch(() => {
+    if (configsByVersion.get(key) === loading) configsByVersion.delete(key);
+  });
+  return loading;
 }
 
 /**

@@ -347,6 +347,15 @@ export class DailyTaskRunner {
     const isTodayAvailable = (stamp) =>
       !Number.isFinite(stamp) || stamp < roleData.dailyTask.dailyTime;
 
+    // 官方字段：statistics["area:arena:last"] = 今日已打的竞技场次数，每日免费 3 次
+    const getArenaRemainingFree = (role = this.roleData) => {
+      const statKey = "area:arena:last";
+      const statsTime = Number(role.statisticsTime?.[statKey]) || 0;
+      const isToday = statsTime >= (role.dailyTask?.dailyTime || 0);
+      const usedToday = isToday ? Number(role.statistics?.[statKey]) || 0 : 0;
+      return Math.max(0, 3 - usedToday);
+    };
+
     const taskList = [];
 
     // 1. 基础任务
@@ -567,8 +576,14 @@ export class DailyTaskRunner {
             "开始竞技场",
           );
 
-          // 前 3 次免费，日常任务只要 1 次，补满以免浪费，场间节奏由 commandDelay 控制
-          const arenaAttempts = Math.max(3, this.getTaskState(13).remaining);
+          // 每日免费 3 次：按服务器 statistics["area:arena:last"] 算今天还剩几次，
+          // 已经打完就不再花钻石买次数（原来固定 max(3, 剩余任务) 会多打付费场）。
+          const arenaAttempts = getArenaRemainingFree();
+          if (arenaAttempts === 0) {
+            this.log("今日竞技场免费次数已用完，跳过（不花钻石买次数）", "warning");
+            return false;
+          }
+          this.log(`竞技场免费剩余 ${arenaAttempts} 次`);
           for (let i = 1; i <= arenaAttempts; i++) {
             this.log(`竞技场战斗 ${i}/${arenaAttempts}`);
             const targets = await this.executeGameCommand(

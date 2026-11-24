@@ -577,6 +577,18 @@
                 >
                   一键领取怪异塔免费道具
                 </n-button>
+                <n-button
+                  size="small"
+                  type="primary"
+                  @click="batchUseAndMergeItems"
+                  :disabled="
+                    isRunning ||
+                    selectedTokens.length === 0 ||
+                    !isWeirdTowerActivityOpen
+                  "
+                >
+                  一键领取+使用+合成
+                </n-button>
               </n-space>
             </n-tab-pane>
             <n-tab-pane name="resource" tab="资源">
@@ -3806,6 +3818,7 @@ const taskGroupDefinitions = [
       "batchUseItems",
       "batchMergeItems",
       "batchClaimFreeEnergy",
+      "batchUseAndMergeItems",
     ],
   },
   {
@@ -4718,6 +4731,7 @@ function getScheduledTask(taskName) {
     batchLegacyGiftSendEnhanced,
     batchUseItems,
     batchMergeItems,
+    batchUseAndMergeItems,
     batchClaimPeachTasks,
     batchGenieSweep,
     batchBuyDreamItems,
@@ -4912,6 +4926,7 @@ const executeScheduledTask = async (task) => {
           "batchUseItems",
           "batchMergeItems",
           "batchClaimFreeEnergy",
+          "batchUseAndMergeItems",
         ].includes(taskName) &&
         !isWeirdTowerActivityOpen.value
       ) {
@@ -6151,6 +6166,7 @@ const {
   skinChallenge,
   batchUseItems,
   batchMergeItems,
+  batchUseAndMergeItems,
 } = tasksTower;
 
 const tasksItem = createTasksItem(createTaskDeps());

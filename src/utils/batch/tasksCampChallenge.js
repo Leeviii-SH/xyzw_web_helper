@@ -512,9 +512,152 @@ export function createTasksCampChallenge(deps) {
     message.success("批量领取营地任务奖励结束");
   };
 
+
+  /**
+   * 营地挑战（按战力挑选目标）：
+   * 只打「还没到目标胜次、且敌人战力打得过」的点位，镜像位带 targetIsMirror。
+   * 参数（region/tier/wins/attempts/powerWin/powerEasy/losses）由页面传入；
+   * 协议字段全部来自客户端抓包（targetIsMirror / useDiamond / petUId）。
+   */
+  const batchCampChallengeSmart = async (cfg = {}) => {
+    if (selectedTokens.value.length === 0) return;
+    const opt = {
+      region: 1, tier: 3, wins: 3, attempts: 10,
+      powerWin: 5_000_000_000, powerEasy: 3_000_000_000, losses: 3,
+      ...cfg,
+    };
+    const now = new Date();
+    const weekday = now.getDay();
+    if (weekday < 2 || weekday > 4) {
+      message.warning("营地挑战只在周二/三/四开放");
+      return;
+    }
+    isRunning.value = true;
+    shouldStop.value = false;
+    selectedTokens.value.forEach((id) => {
+      tokenStatus.value[id] = "waiting";
+    });
+
+    const oppoKey = String(weekday); // 2=周二 3=周三 4=周四（oppoMap 的键就是星期）
+    const [from, to] = opt.region === 1 ? [1, 10] : opt.region === 2 ? [11, 20] : [21, 30];
+    const nodeIds = Array.from({ length: to - from + 1 }, (_, i) => from + i);
+    const powers = new Map(); // roleId → 战力，跨号共享，省请求
+    const winsOf = (d) => Math.max(0, Number(d?.challengeCnt || 0) - Number(d?.failCnt || 0));
+    const todayKey = String(now.getFullYear() % 100).padStart(2, "0") + String(now.getMonth() + 1).padStart(2, "0") + String(now.getDate()).padStart(2, "0");
+
+    await Promise.all(selectedTokens.value.map(async (tokenId) => {
+      const token = tokens.value.find((t) => t.id === tokenId);
+      let wins = 0, attempts = 0, streak = 0;
+      const blocked = new Set();
+      try {
+        tokenStatus.value[tokenId] = "running";
+        currentRunningTokenId.value = tokenId;
+        addLog({ time: new Date().toLocaleTimeString(), message: `=== 营地挑战(按战力) 开始: ${token.name} ===`, type: "info" });
+        await ensureConnection(tokenId);
+
+        const info = await tokenStore.sendMessageWithPromise(tokenId, "role_getroleinfo", {}, 12000);
+        const role = info?.role || {};
+        const battleTeam = {};
+        for (const [pos, hero] of Object.entries(role.battleTeam || {})) {
+          const hid = hero?.heroId ?? hero?.id;
+          if (hid) battleTeam[pos] = Number(hid);
+        }
+        if (!Object.keys(battleTeam).length) throw new Error("主线阵容为空");
+        const teamSetParams = {
+          lordWeaponId: role.lordWeaponId || 0,
+          petUId: role.pet?.petUId || "",
+          battleTeam,
+        };
+
+        while (!shouldStop.value && wins < opt.wins && attempts < opt.attempts && streak < opt.losses) {
+          const res = await tokenStore.sendMessageWithPromise(tokenId, "club_getinfo", {}, 10000);
+          const stat = (res?.siege?.attackMap || {})[todayKey] || {};
+          const wonToday = Math.max(Number(stat.aSuccessCnt || 0), wins);
+          const usedToday = Math.max(Number(stat.attackCnt || 0), attempts);
+          if (wonToday >= opt.wins) { addLog({ time: new Date().toLocaleTimeString(), message: `${token.name} 今日已贡献 ${wonToday} 胜，跳过`, type: "info" }); break; }
+          if (usedToday >= opt.attempts) { addLog({ time: new Date().toLocaleTimeString(), message: `${token.name} 今日次数已用完（${usedToday}/${opt.attempts}）`, type: "warning" }); break; }
+
+          const defenders = res?.club?.oppoMap?.[oppoKey]?.defenders || {};
+          for (const nid of nodeIds) {
+            const d = defenders[nid] ?? defenders[String(nid)];
+            if (!d || powers.has(d.roleId)) continue;
+            let power = NaN;
+            try {
+              const t = await tokenStore.sendMessageWithPromise(tokenId, "club_gettargetteam", { targetId: d.roleId }, 6000);
+              power = Number(t?.roleBattleTeam?.role?.power ?? NaN);
+            } catch { /* 回退下一个接口 */ }
+            if (!Number.isFinite(power)) {
+              try {
+                const t2 = await tokenStore.sendMessageWithPromise(tokenId, "role_gettargetteam", { targetId: d.roleId }, 6000);
+                power = Number(t2?.teamInfo?.power ?? NaN);
+              } catch { power = NaN; }
+            }
+            powers.set(d.roleId, power);
+          }
+
+          const cands = [];
+          for (const nid of nodeIds) {
+            if (blocked.has(nid)) continue;
+            const d = defenders[nid] ?? defenders[String(nid)];
+            if (!d) continue;
+            const w = winsOf(d);
+            const deficit = opt.tier - w;
+            if (d.defeated || deficit <= 0) continue;
+            const power = Number(powers.get(d.roleId));
+            if (!Number.isFinite(power) || power > opt.powerWin) continue;
+            cands.push({ nodeId: nid, d, deficit, power, easy: power <= opt.powerEasy });
+          }
+          cands.sort((a, b) => b.deficit - a.deficit || (b.easy - a.easy) || a.power - b.power || a.nodeId - b.nodeId);
+          if (!cands.length) { addLog({ time: new Date().toLocaleTimeString(), message: `${token.name} 区域${opt.region} 没有可打的目标`, type: "warning" }); break; }
+
+          const t = cands[0];
+          addLog({ time: new Date().toLocaleTimeString(), message: `${token.name} 打点位${t.nodeId} ${t.d.name}（${winsOf(t.d)}/${opt.tier} 胜，战力 ${(t.power / 1e8).toFixed(2)} 亿${t.d.mirror ? "，镜像" : ""}）`, type: "info" });
+          attempts++;
+          try {
+            const atk = await tokenStore.sendMessageWithPromise(tokenId, "club_attack", {
+              nodeId: t.nodeId,
+              targetId: t.d.roleId,
+              targetIsMirror: Boolean(t.d.mirror),
+              challengeCnt: Number(t.d.challengeCnt || 0),
+              failCnt: Number(t.d.failCnt || 0),
+              useItem: false,
+              teamSetParams,
+              useDiamond: 0,
+            }, 12000);
+            const ok = typeof atk?.battleData?.result?.isWin === "boolean"
+              ? atk.battleData.result.isWin
+              : atk?.battleData?.result?.accept?.ext?.curHP === 0;
+            if (ok) { wins++; streak = 0; addLog({ time: new Date().toLocaleTimeString(), message: `${token.name} 胜利 ${wins}/${opt.wins}`, type: "success" }); }
+            else { streak++; blocked.add(t.nodeId); addLog({ time: new Date().toLocaleTimeString(), message: `${token.name} 失败（连续失败 ${streak}/${opt.losses}）`, type: "warning" }); }
+          } catch (err) {
+            streak++;
+            blocked.add(t.nodeId);
+            addLog({ time: new Date().toLocaleTimeString(), message: `${token.name} 挑战出错 ${String(err?.message || err).slice(0, 60)}（连续失败 ${streak}/${opt.losses}）`, type: "warning" });
+          }
+          await new Promise((r) => setTimeout(r, 300));
+        }
+        const reason = wins >= opt.wins ? "达到胜利上限" : streak >= opt.losses ? "连续失败过多" : attempts >= opt.attempts ? "尝试次数用尽" : "无可打目标";
+        addLog({ time: new Date().toLocaleTimeString(), message: `${token.name} 结束（胜 ${wins}，尝试 ${attempts}，${reason}）`, type: "info" });
+        tokenStatus.value[tokenId] = "completed";
+      } catch (error) {
+        tokenStatus.value[tokenId] = "failed";
+        addLog({ time: new Date().toLocaleTimeString(), message: `${token.name} 营地挑战失败: ${error?.message || error}`, type: "error" });
+      } finally {
+        tokenStore.closeWebSocketConnection(tokenId);
+        releaseConnectionSlot();
+        addLog({ time: new Date().toLocaleTimeString(), message: `${token.name} 连接已关闭`, type: "info" });
+      }
+    }));
+
+    isRunning.value = false;
+    currentRunningTokenId.value = null;
+    message.success("营地挑战（按战力挑选）结束");
+  };
+
   return {
     batchCampChallenge,
     batchCampChallengePet,
     batchCampClaimTasks,
+    batchCampChallengeSmart,
   };
 }

@@ -405,6 +405,13 @@
                 >
                   一键灯神扫荡
                 </n-button>
+                <n-button
+                  size="small"
+                  @click="openCampSmart"
+                  :disabled="isRunning || selectedTokens.length === 0"
+                >
+                  营地挑战(按战力)
+                </n-button>
                 <n-popselect
                   :value="campChallengeMode"
                   :options="campChallengeModeOptions"
@@ -782,6 +789,50 @@
     </div>
 
     <!-- Settings Modal -->
+    <n-modal
+      v-model:show="showCampModal"
+      preset="card"
+      title="营地挑战（按战力挑选）"
+      style="width: 90%; max-width: 460px"
+    >
+      <div class="settings-content">
+        <div class="settings-grid">
+          <div class="setting-item">
+            <label class="setting-label">区域</label>
+            <n-select v-model:value="campCfg.region" size="small" :options="campRegionOptions" />
+          </div>
+          <div class="setting-item">
+            <label class="setting-label">目标档位</label>
+            <n-select v-model:value="campCfg.tier" size="small" :options="campTierOptions" />
+          </div>
+          <div class="setting-item">
+            <label class="setting-label">每号胜利上限</label>
+            <n-input-number v-model:value="campCfg.wins" size="small" :min="1" :max="10" />
+          </div>
+          <div class="setting-item">
+            <label class="setting-label">每号尝试次数</label>
+            <n-input-number v-model:value="campCfg.attempts" size="small" :min="1" :max="10" />
+          </div>
+          <div class="setting-item">
+            <label class="setting-label">可打战力上限（亿）</label>
+            <n-input-number v-model:value="campCfg.powerWinYi" size="small" :min="1" :max="10000" />
+          </div>
+          <div class="setting-item">
+            <label class="setting-label">优先打（亿）</label>
+            <n-input-number v-model:value="campCfg.powerEasyYi" size="small" :min="1" :max="10000" />
+          </div>
+          <div class="setting-item">
+            <label class="setting-label">连败停</label>
+            <n-input-number v-model:value="campCfg.losses" size="small" :min="1" :max="10" />
+          </div>
+        </div>
+        <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px">
+          <n-button size="small" @click="showCampModal = false">取消</n-button>
+          <n-button size="small" type="primary" @click="runCampSmart">开始挑战</n-button>
+        </div>
+      </div>
+    </n-modal>
+
     <n-modal
       v-model:show="showSettingsModal"
       preset="card"
@@ -3791,6 +3842,7 @@ const taskGroupDefinitions = [
       "batchCampChallenge",
       "batchCampChallengePet",
       "batchCampClaimTasks",
+      "batchCampChallengeSmart",
       "store_syncpurchaseconfig",
       "store_purchase",
       "collection_claimfreereward",
@@ -4717,6 +4769,7 @@ function getScheduledTask(taskName) {
     batchCampChallenge,
     batchCampChallengePet,
     batchCampClaimTasks,
+    batchCampChallengeSmart,
     batchApplyLegion,
     batcharenafight,
     batchTopUpFish,
@@ -6210,10 +6263,43 @@ const tasksApex = createTasksApex(createTaskDeps());
 const { batchApexGuess } = tasksApex;
 
 const tasksCampChallenge = createTasksCampChallenge(createTaskDeps());
-const { batchCampChallenge, batchCampChallengePet, batchCampClaimTasks } =
+const { batchCampChallenge, batchCampChallengePet, batchCampClaimTasks, batchCampChallengeSmart } =
   tasksCampChallenge;
 const tasksXuanwuBlessing = createTasksXuanwuBlessing(createTaskDeps());
 const { batchXuanwuBlessing } = tasksXuanwuBlessing;
+
+// 营地挑战（按战力挑选）面板
+const showCampModal = ref(false);
+const campCfg = reactive({ region: 1, tier: 3, wins: 3, attempts: 10, powerWinYi: 50, powerEasyYi: 30, losses: 3 });
+const campRegionOptions = [
+  { label: "区域1（点位 1-10）", value: 1 },
+  { label: "区域2（点位 11-20）", value: 2 },
+  { label: "区域3（点位 21-30）", value: 3 },
+];
+const campTierOptions = [
+  { label: "普通（3 胜）", value: 3 },
+  { label: "困难（4 胜）", value: 4 },
+  { label: "炼狱（5 胜）", value: 5 },
+];
+const openCampSmart = () => {
+  if (!selectedTokens.value.length) {
+    message.warning("先选号");
+    return;
+  }
+  showCampModal.value = true;
+};
+const runCampSmart = async () => {
+  showCampModal.value = false;
+  await batchCampChallengeSmart({
+    region: campCfg.region,
+    tier: campCfg.tier,
+    wins: campCfg.wins,
+    attempts: campCfg.attempts,
+    powerWin: Math.round(campCfg.powerWinYi * 1e8),
+    powerEasy: Math.round(campCfg.powerEasyYi * 1e8),
+    losses: campCfg.losses,
+  });
+};
 
 // 营地挑战模式选择
 const campChallengeMode = ref("pet");
